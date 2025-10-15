@@ -1,0 +1,343 @@
+<!doctype html>
+
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Game Pesawat Balap</title>
+  <style>
+    :root{--bg:#0b1220;--panel:#0f1724;--accent:#0ea5a5;--danger:#ef4444}
+    *{box-sizing:border-box;font-family:Inter,Segoe UI,system-ui,Arial}
+    html,body{height:100%;margin:0;background:linear-gradient(180deg,#071022 0%, #091428 60%);color:#e6eef6}
+    .wrap{max-width:900px;margin:18px auto;padding:16px}
+    header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
+    h1{font-size:20px;margin:0}
+    .panel{background:rgba(255,255,255,0.03);padding:12px;border-radius:10px;box-shadow:0 6px 18px rgba(2,6,23,0.6)}
+    #gameCanvas{display:block;background:linear-gradient(180deg,rgba(255,255,255,0.02),transparent);width:100%;height:auto;border-radius:8px}
+    .hud{display:flex;gap:8px;margin-top:10px;align-items:center}
+    .hud > div{padding:8px 12px;border-radius:8px;background:rgba(255,255,255,0.02)}
+    .btn{background:var(--accent);color:#042026;border:0;padding:8px 12px;border-radius:8px;cursor:pointer;font-weight:600}
+    .btn:active{transform:translateY(1px)}
+    .small{font-size:13px;color:#bcd}
+    .controls{margin-top:10px;font-size:13px;color:#cfe}
+    .footer{margin-top:14px;color:#9bb}
+    @media (max-width:600px){h1{font-size:16px}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Game Pesawat Balap — Mainkan Sekarang</h1>
+      <div class="panel small">WASD / Panah &nbsp; • &nbsp; Ketuk untuk maju</div>
+    </header><div class="panel">
+  <canvas id="gameCanvas" width="720" height="480"></canvas>
+  <div class="hud">
+    <div id="scoreBox">Score: <strong id="score">0</strong></div>
+    <div id="speedBox">Kecepatan: <strong id="speed">1</strong></div>
+    <button id="startBtn" class="btn">Mulai</button>
+    <button id="pauseBtn" class="btn" style="background:#f59e0b">Jeda</button>
+    <button id="muteBtn" class="btn" style="background:#94a3b8">Suara</button>
+  </div>
+  <div class="controls">
+    Tujuan: Hindari pesawat lain dan kumpulkan bintang. Semakin lama, semakin cepat.
+  </div>
+</div>
+
+<div class="footer small">Tip: Mainkan di desktop untuk kontrol penuh. Ingin versi dengan gambar pesawat &amp; leaderboard? Minta saja.</div>
+
+  </div>  <script>
+  /* Game Pesawat Balap - Vanilla JS + Canvas
+     Fitur:
+     - Pesawat pemain bergerak horizontal dan sedikit vertikal
+     - Musuh muncul dari atas bergerak ke bawah
+     - Bintang sebagai collectible
+     - Skor, level/kecepatan meningkat, collision detection
+     - Keyboard + touch support
+  */
+  (function(){
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const DPR = window.devicePixelRatio || 1;
+    const width = canvas.width;
+    const height = canvas.height;
+    canvas.style.width = '100%';
+    canvas.style.height = 'auto';
+
+    // Hi-DPI support
+    canvas.width = width * DPR;
+    canvas.height = height * DPR;
+    ctx.scale(DPR, DPR);
+
+    // UI elements
+    const scoreEl = document.getElementById('score');
+    const speedEl = document.getElementById('speed');
+    const startBtn = document.getElementById('startBtn');
+    const pauseBtn = document.getElementById('pauseBtn');
+    const muteBtn = document.getElementById('muteBtn');
+
+    // Audio (simple oscillator beep)
+    let audioCtx = null;
+    let muted = false;
+    function beep(f=440,d=0.06){
+      if(muted) return;
+      if(!audioCtx){audioCtx = new (window.AudioContext || window.webkitAudioContext)();}
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.type = 'sine'; o.frequency.value = f;
+      g.gain.value = 0.06;
+      o.connect(g); g.connect(audioCtx.destination);
+      o.start(); g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + d);
+      setTimeout(()=>o.stop(), d*1000+50);
+    }
+
+    muteBtn.addEventListener('click', ()=>{muted=!muted; muteBtn.textContent = muted? 'Suara: Mati' : 'Suara';});
+
+    // Game state
+    let running = false;
+    let paused = false;
+    let lastTime = 0;
+    let spawnTimer = 0;
+    let spawnInterval = 1200; // ms
+    let starTimer = 0;
+    let starInterval = 2500;
+    let difficultyTimer = 0;
+
+    const player = {
+      x: width/2,
+      y: height - 80,
+      w: 36,
+      h: 48,
+      speed: 220, // px/s
+      vx:0, vy:0
+    };
+
+    let enemies = [];
+    let stars = [];
+    let score = 0;
+    let level = 1;
+
+    function reset(){
+      enemies = [];
+      stars = [];
+      score = 0;
+      level = 1;
+      player.x = width/2;
+      player.y = height - 80;
+      player.speed = 220;
+      spawnInterval = 1200;
+      starInterval = 2500;
+      lastTime = performance.now();
+      spawnTimer = 0; starTimer = 0; difficultyTimer = 0;
+      updateUI();
+    }
+
+    function updateUI(){
+      scoreEl.textContent = Math.floor(score);
+      speedEl.textContent = level;
+    }
+
+    function spawnEnemy(){
+      const ew = 34 + Math.random()*22;
+      const eh = 26 + Math.random()*28;
+      const ex = 30 + Math.random()*(width-60-ew);
+      const ey = -eh - 10;
+      const baseSpeed = 60 + Math.random()*80 + level*20;
+      enemies.push({x:ex,y:ey,w:ew,h:eh,vy:baseSpeed,rot:Math.random()*0.6-0.3});
+    }
+
+    function spawnStar(){
+      const s = {x:40 + Math.random()*(width-80), y:-20, r:8, vy:80 + Math.random()*80 + level*10};
+      stars.push(s);
+    }
+
+    // Input
+    const keys = {};
+    window.addEventListener('keydown', (e)=>{keys[e.key.toLowerCase()]=true; if(!running) return;});
+    window.addEventListener('keyup', (e)=>{keys[e.key.toLowerCase()]=false;});
+
+    // Touch: drag to move horizontally, tap to accelerate upward briefly
+    let touching = false; let lastTouchX = null;
+    canvas.addEventListener('touchstart', (ev)=>{
+      ev.preventDefault(); touching = true; lastTouchX = ev.touches[0].clientX; // start
+    }, {passive:false});
+    canvas.addEventListener('touchmove', (ev)=>{ev.preventDefault(); const x = ev.touches[0].clientX; const rect = canvas.getBoundingClientRect(); const rel = (x - rect.left) / rect.width * width; player.x = Math.max(20, Math.min(width-20, rel));}, {passive:false});
+    canvas.addEventListener('touchend', (ev)=>{ev.preventDefault(); touching=false; lastTouchX=null;});
+
+    // Collision helper
+    function rectsOverlap(a,b){
+      return !(a.x + a.w < b.x || a.x > b.x + b.w || a.y + a.h < b.y || a.y > b.y + b.h);
+    }
+
+    // Draw simple stylized plane for player and enemies
+    function drawPlane(x,y,w,h,rot=0,fill=true){
+      ctx.save();
+      ctx.translate(x,y);
+      ctx.rotate(rot);
+      // body
+      ctx.beginPath();
+      ctx.moveTo(0, -h*0.45);
+      ctx.quadraticCurveTo(w*0.6, -h*0.15, 0, h*0.45);
+      ctx.quadraticCurveTo(-w*0.6, -h*0.15, 0, -h*0.45);
+      ctx.closePath();
+      ctx.fillStyle = '#08b6b6';
+      ctx.fill();
+      // wings
+      ctx.beginPath();
+      ctx.moveTo(-w*0.5, 0);
+      ctx.lineTo(-w*1.1, h*0.3);
+      ctx.lineTo(-w*0.2, h*0.2);
+      ctx.moveTo(w*0.5, 0);
+      ctx.lineTo(w*1.1, h*0.3);
+      ctx.lineTo(w*0.2, h*0.2);
+      ctx.fillStyle = '#06a3a3';
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function drawEnemy(x,y,w,h,rot=0){
+      ctx.save(); ctx.translate(x + w/2, y + h/2); ctx.rotate(rot);
+      ctx.fillStyle = '#f97316';
+      ctx.fillRect(-w/2, -h/2, w, h);
+      ctx.restore();
+    }
+
+    function drawStar(x,y,r){
+      ctx.save(); ctx.translate(x,y);
+      ctx.beginPath();
+      for(let i=0;i<5;i++){
+        ctx.lineTo(Math.cos((18 + i*72)*Math.PI/180)*r, -Math.sin((18 + i*72)*Math.PI/180)*r);
+        ctx.lineTo(Math.cos((54 + i*72)*Math.PI/180)*Math.PI/180*r*0.5, -Math.sin((54 + i*72)*Math.PI/180)*r*0.5);
+      }
+      ctx.closePath(); ctx.fillStyle='#fcd34d'; ctx.fill(); ctx.restore();
+    }
+
+    function update(dt){
+      // Player movement
+      const left = keys['arrowleft'] || keys['a'];
+      const right = keys['arrowright'] || keys['d'];
+      const up = keys['arrowup'] || keys['w'];
+      const down = keys['arrowdown'] || keys['s'];
+      let dx = 0, dy = 0;
+      if(left) dx -= 1; if(right) dx += 1; if(up) dy -= 0.6; if(down) dy += 0.6;
+      // normalize
+      if(dx !== 0){ player.vx = dx * player.speed; } else { player.vx = 0; }
+      player.vy = dy * (player.speed * 0.6);
+      player.x += player.vx * dt;
+      player.y += player.vy * dt;
+      // clamp
+      player.x = Math.max(20, Math.min(width-20, player.x));
+      player.y = Math.max(60, Math.min(height-40, player.y));
+
+      // spawn
+      spawnTimer += dt*1000;
+      if(spawnTimer > spawnInterval){ spawnEnemy(); spawnTimer = 0; }
+      starTimer += dt*1000;
+      if(starTimer > starInterval){ spawnStar(); starTimer = 0; }
+
+      // difficulty increase
+      difficultyTimer += dt*1000;
+      if(difficultyTimer > 7000){ level++; difficultyTimer = 0; spawnInterval = Math.max(420, spawnInterval - 80); starInterval = Math.max(900, starInterval - 80); beep(900,0.04); }
+
+      // enemies movement
+      for(let i=enemies.length-1;i>=0;i--){
+        const e = enemies[i]; e.y += e.vy * dt; e.x += Math.sin((e.y/50))*10*dt*60 * e.rot;
+        // remove offscreen
+        if(e.y > height + 60) enemies.splice(i,1);
+        // collision
+        const pbox = {x:player.x - player.w/2, y: player.y - player.h/2, w:player.w, h:player.h};
+        const ebox = {x:e.x, y:e.y, w:e.w, h:e.h};
+        if(rectsOverlap(pbox, ebox)){
+          // hit
+          running = false; paused = false;
+          beep(120,0.12);
+          showGameOver();
+        }
+      }
+
+      // stars movement
+      for(let i=stars.length-1;i>=0;i--){
+        const s = stars[i]; s.y += s.vy * dt;
+        if(s.y > height + 40) stars.splice(i,1);
+        const pbox = {x:player.x - player.w/2, y: player.y - player.h/2, w:player.w, h:player.h};
+        const sbox = {x:s.x - s.r, y:s.y - s.r, w:s.r*2, h:s.r*2};
+        if(rectsOverlap(pbox,sbox)){
+          score += 10 * level; beep(1320,0.04);
+          stars.splice(i,1);
+        }
+      }
+
+      // progress score
+      score += dt * 6 * level;
+      updateUI();
+    }
+
+    function render(){
+      // clear
+      ctx.clearRect(0,0,width,height);
+
+      // background - moving stripes
+      const t = performance.now()/200;
+      for(let i=0;i<20;i++){
+        const y = (i*60 + (t%60));
+        ctx.fillStyle = 'rgba(255,255,255,'+ (0.02 + i*0.002) + ')';
+        ctx.fillRect(0, (y%height)-40, width, 18);
+      }
+
+      // stars (collectibles)
+      for(const s of stars) drawStar(s.x, s.y, s.r);
+
+      // enemies
+      for(const e of enemies) drawEnemy(e.x, e.y, e.w, e.h, Math.sin(e.y/70)*0.2);
+
+      // player
+      drawPlane(player.x, player.y, player.w, player.h, (keys['arrowleft']||keys['a']?-0.35: (keys['arrowright']||keys['d']?0.35:0)));
+
+      // HUD overlay
+      ctx.save();
+      ctx.fillStyle = 'rgba(2,6,23,0.4)'; ctx.fillRect(8,8,160,40);
+      ctx.fillStyle = '#dff'; ctx.font = '14px sans-serif'; ctx.fillText('Score: '+Math.floor(score), 16, 30);
+      ctx.restore();
+    }
+
+    function loop(now){
+      if(!lastTime) lastTime = now; const dt = Math.min(0.032, (now - lastTime)/1000);
+      lastTime = now;
+      if(running && !paused){ update(dt); }
+      render();
+      requestAnimationFrame(loop);
+    }
+
+    function showGameOver(){
+      setTimeout(()=>{
+        const again = confirm('Game Over! Skor Anda: ' + Math.floor(score) + '\nMain lagi?');
+        if(again){ reset(); running = true; }
+      }, 20);
+    }
+
+    startBtn.addEventListener('click', ()=>{
+      if(!running){ reset(); running = true; lastTime = performance.now(); }
+    });
+    pauseBtn.addEventListener('click', ()=>{ if(!running) return; paused = !paused; pauseBtn.textContent = paused? 'Lanjut' : 'Jeda'; });
+
+    // start render loop
+    requestAnimationFrame(loop);
+
+    // helpful: allow mouse move to steer
+    canvas.addEventListener('mousemove', (e)=>{
+      const rect = canvas.getBoundingClientRect(); const rel = (e.clientX - rect.left) / rect.width * width; if(running){ player.x = Math.max(20, Math.min(width-20, rel)); }
+    });
+
+    // support resizing (simple)
+    window.addEventListener('resize', ()=>{/* canvas is responsive via CSS, core logic uses fixed internal size */});
+
+    // initial welcome animation
+    (function welcomeAnim(){
+      ctx.clearRect(0,0,width,height);
+      ctx.save(); ctx.font='24px sans-serif'; ctx.fillStyle='#cfe'; ctx.textAlign='center'; ctx.fillText('Tekan "Mulai" untuk bermain', width/2, height/2 - 10);
+      ctx.font='14px sans-serif'; ctx.fillText('Gunakan WASD / Panah atau sentuh layar', width/2, height/2 + 20);
+      ctx.restore();
+    })();
+
+  })();
+  </script></body>
+</html>
